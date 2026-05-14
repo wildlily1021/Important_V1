@@ -30,6 +30,12 @@ from PIL import Image
 from unet import Unet
 import os
 import matplotlib
+from stft_pipeline import (
+    load_stft_metadata,
+    pixel_height_to_bandwidth_hz,
+    pixel_to_frequency_hz,
+    resolve_recognition_image_path,
+)
 
 matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei']  # 设置中文字体为黑体
 matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号 "-" 显示为方块的问题
@@ -59,6 +65,24 @@ def safe_detect(unet_obj, image):
         elif len(_res) == 2:
             return _res[0], _res[1], None
     return _res, None, None
+
+
+def map_center_frequency_from_stft(image_path, image_height, center_frequency_output, fs_hz):
+    stft_metadata = load_stft_metadata(image_path)
+    if stft_metadata:
+        return (
+            pixel_to_frequency_hz(center_frequency_output, stft_metadata, image_height_px=image_height),
+            stft_metadata,
+        )
+    fallback = fs_hz / image_height * (image_height - center_frequency_output) - fs_hz / 2
+    return fallback, None
+
+
+def map_bandwidth_from_stft(rect_height, image_height, image_path, stft_metadata=None):
+    stft_metadata = stft_metadata or load_stft_metadata(image_path)
+    if stft_metadata:
+        return pixel_height_to_bandwidth_hz(rect_height, stft_metadata, image_height_px=image_height) / 1e9
+    return rect_height / image_height * 10
 
 class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
     def __init__(self):
@@ -163,6 +187,16 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
         self._pending_quality_data = None
         # 开始计算按钮（在 UI 中定义），初始隐藏并禁用，等待外部文件模式时启用
         self._pending_calculation_data = None
+        self._confirmed_Fs_input = None
+        self._confirmed_Modulation_input = None
+        self._file_sample_rate = None
+        self._fs_input_source = None
+        try:
+            if not hasattr(self, 'start_input_btn') and hasattr(self, 'start_eval_btn_2'):
+                self.start_input_btn = self.start_eval_btn_2
+                self.start_input_btn.clicked.connect(self.start_input)
+        except Exception:
+            pass
 
         # 记录原始几何，用于最大化/恢复来回切换
         try:
@@ -756,6 +790,58 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
         else:
             return 100  # 默认因子为1
 
+    def _read_fs_from_ui(self):
+        text = self.Fs_txt.toPlainText().strip()
+        if text == "":
+            raise ValueError("采样频率未输入")
+        return float(text) * self.Fs_level_combo()
+
+    def _active_fs_input(self):
+        confirmed_fs = getattr(self, '_confirmed_Fs_input', None)
+        if confirmed_fs is not None:
+            return confirmed_fs
+        return self._read_fs_from_ui()
+
+    def _active_modulation_input(self):
+        confirmed_modulation = getattr(self, '_confirmed_Modulation_input', None)
+        if confirmed_modulation is not None:
+            return confirmed_modulation
+        return self.modulation_level_combo()
+
+    def _set_fs_controls_from_hz(self, fs_value):
+        if fs_value is None or not np.isfinite(fs_value) or fs_value <= 0:
+            return
+
+        for unit, factor in (("G", 1e9), ("M", 1e6), ("K", 1e3)):
+            scaled = fs_value / factor
+            if abs(scaled) >= 1:
+                self.Fs_txt.setPlainText(f"{scaled:.12g}")
+                index = self.Fs_level.findText(unit)
+                if index >= 0:
+                    self.Fs_level.setCurrentIndex(index)
+                return
+
+        self.Fs_txt.setPlainText(f"{fs_value:.12g}")
+        if self.Fs_level.count() > 3:
+            self.Fs_level.setCurrentIndex(3)
+
+    def confirm_signalquality_input(self, checked=False):
+        try:
+            self._confirmed_Fs_input = self._read_fs_from_ui()
+            self._confirmed_Modulation_input = self.modulation_level_combo()
+            self._fs_input_source = 'ui'
+            print(
+                "Confirmed signal input: "
+                f"Fs={self._confirmed_Fs_input:.6e} Hz, "
+                f"Modulation={self._confirmed_Modulation_input}"
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "未输入参数", f"确认参数失败：{e}")
+            return
+
+    def start_input(self):
+        return self.confirm_signalquality_input()
+
     # FFT图像放大后还原模块
     def reset_view(self):
         # 还原视图
@@ -790,6 +876,10 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
             self._pending_quality_data = None
             self.start_eval_btn.setVisible(False)
             self.start_eval_btn.setEnabled(False)
+            self._file_sample_rate = None
+            if getattr(self, '_fs_input_source', None) == 'file':
+                self._confirmed_Fs_input = None
+                self._fs_input_source = None
             # 重置计数与雷达历史数据，确保外部导入信号的第一次评估为“信号1”
             try:
                 global count
@@ -819,7 +909,8 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
         # self.widget_Eye.setVisible(False)  # 设置不可见
         # 空缺输入控制
         global Fs_input, Fc_input, Rs_input, SNR_input
-        if self.Fs_txt.toPlainText().strip() == "":
+        file_can_supply_fs = bool(getattr(self, 'file_path', None) and self.file_path.lower().endswith('.csv'))
+        if self.Fs_txt.toPlainText().strip() == "" and not file_can_supply_fs:
             # 文本为空，显示错误对话框
             QMessageBox.warning(self, "未输入参数", "采样频率未输入，请输入参数")
             return
@@ -839,11 +930,18 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
         else:
             # 将参数从文本框中读取并转化成float变量（后续根据需要选择是否要修改成别的类型）
             global rec_wave, Fs_input
-            Fs_input = float(self.Fs_txt.toPlainText()) * self.Fs_level_combo()
+            try:
+                Fs_input = self._active_fs_input()
+            except Exception:
+                if file_can_supply_fs:
+                    Fs_input = None
+                else:
+                    QMessageBox.warning(self, "未输入参数", "采样频率未输入，请输入参数")
+                    return
             Fc_input = float(self.Fc_txt.toPlainText()) * self.Fc_level_combo()
             Rs_input = float(self.Rs_txt.toPlainText()) * self.Rs_level_combo()
             SNR_input = float(self.SNR_txt.toPlainText())
-            Modulation_input = self.modulation_level_combo()
+            Modulation_input = self._active_modulation_input()
             self.progressBar.setValue(0)
             self.progressBar.show()
 
@@ -855,13 +953,19 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
             # self.file_path, _ = QFileDialog.getOpenFileName(self, "Select TXT File", "", "Text Files (*.txt);;All Files (*)",
             #                                                options=options)
             current_path = self.file_path
+            file_sample_rate = None
             if current_path:
                 # 根据文件扩展名选择读取方式
                 if current_path.lower().endswith(('.xlsx', '.xls', '.csv')):
                     # Excel/CSV文件：使用load_excel_signal函数读取
-                    # 第一列作为实部(a)，第二列作为虚部(n)，转换为复数形式(a+nj)
                     try:
-                        rec_wave = load_excel_signal(current_path, normalize=True)
+                        rec_wave, file_sample_rate = load_excel_signal(current_path, normalize=True, return_fs=True)
+                        if file_sample_rate is not None:
+                            Fs_input = file_sample_rate
+                            self._file_sample_rate = file_sample_rate
+                            self._confirmed_Fs_input = file_sample_rate
+                            self._fs_input_source = 'file'
+                            self._set_fs_controls_from_hz(file_sample_rate)
                         print(f"成功从文件加载信号数据，共 {len(rec_wave)} 个采样点")
                     except Exception as e:
                         QMessageBox.warning(self, "文件读取失败", f"读取文件出错：{str(e)}")
@@ -880,12 +984,15 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
                 QMessageBox.warning(self, "文件选择失败", "未选择文件，请重新选择")
                 return
             self.update_progress()
-            if self.Fs_txt.toPlainText().strip() == "":
+            if file_sample_rate is None and self.Fs_txt.toPlainText().strip() == "":
                 # 文本为空，显示错误对话框
                 QMessageBox.warning(self, "未输入参数", "采样频率未输入，请输入参数")
                 return
             else:
-                Fs_input = float(self.Fs_txt.toPlainText()) * self.Fs_level_combo()
+                if file_sample_rate is not None:
+                    Fs_input = file_sample_rate
+                else:
+                    Fs_input = self._active_fs_input()
                 [Fs, rec_wave, magnitude_GUJI, SNR_GUJI, RS_GUJI] = signal_read(rec_wave, Fs_input)
                 # 将数据输入到STFT处理过程，得到图片
                 print("rec_wave_picture:", rec_wave[0:3])
@@ -919,16 +1026,21 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
                 Rs_process = RS_GUJI / 1e9
                 Fs_process = Fs / 1e9
                 # 加载图像,一张是原始STFT，一张是标注了中心频点和高度的。
-                image_path_STFT = './signal_ana/STFT_Org_cropped.jpg'
+                image_path_STFT = resolve_recognition_image_path('./signal_ana/STFT_Org_txt.jpg')
                 [height, center_frequency_output] = process_image(Rs_process, 2, rec_wave, Fs, SNR_estimate, image_path_STFT)
                 self.update_progress()
 
                 # 加载图像,一张是原始STFT，一张是标注了中心频点和高度的。
-                image_path_STFT = './signal_ana/STFT_Org_cropped.jpg'
+                image_path_STFT = resolve_recognition_image_path('./signal_ana/STFT_Org_txt.jpg')
                 image_path_STFT_ana = './signal_ana/STFT_Ana_txt.jpg'
                 image_grad_CAM = 'signal_ana/bandwidth_Grad_Cam.jpg'
                 # 图像识别求Fc（采用原始程序的计算方式，将像素行映射到频率）
-                center_frequency_estimate = Fs_input / height * (height - center_frequency_output) - Fs_input / 2
+                center_frequency_estimate, stft_metadata = map_center_frequency_from_stft(
+                    image_path_STFT,
+                    height,
+                    center_frequency_output,
+                    Fs_input,
+                )
                 Fc_process = center_frequency_estimate / 1e9
                 self.update_progress()
 
@@ -948,7 +1060,7 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
                 r_image, rect_height, flag_mask = safe_detect(unet, image)
                 img_name = 'street_mask.jpg'
                 r_image.save(os.path.join(dir_save_path, img_name))
-                bandwidth_estimate_1 = rect_height / height * 10
+                bandwidth_estimate_1 = map_bandwidth_from_stft(rect_height, height, image_path_STFT, stft_metadata)
 
                 # 神经网络求bandwidth
                 image_path = image_path_STFT
@@ -966,7 +1078,7 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
                 r_image, rect_height, flag_mask = safe_detect(unet, image)
                 img_name = 'street_mask.jpg'
                 r_image.save(os.path.join(dir_save_path, img_name))
-                bandwidth_estimate_2 = rect_height / height * 10
+                bandwidth_estimate_2 = map_bandwidth_from_stft(rect_height, height, image_path_STFT, stft_metadata)
 
                 bandwidth_true = (1 + 0.35 / 2) * Rs_input
                 print("真实带宽：", bandwidth_true)
@@ -1100,6 +1212,8 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
                     "SNR_input": SNR_input,
                     "evm_percentage": evm_percentage,
                     "Modulation_input": Modulation_input,
+                    "Fs_input": Fs_input,
+                    "file_sample_rate": file_sample_rate,
                 }
                 # 保持质量评估区始终可见（只清空 widget_quality 的绘图内容，保留参数与结构）
                 try:
@@ -1186,11 +1300,11 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
         else:
             # 将参数从文本框中读取并转化成float变量（后续根据需要选择是否要修改成别的类型）
 
-            Fs_input = float(self.Fs_txt.toPlainText()) * self.Fs_level_combo()
+            Fs_input = self._active_fs_input()
             Fc_input = float(self.Fc_txt.toPlainText()) * self.Fc_level_combo()
             Rs_input = float(self.Rs_txt.toPlainText()) * self.Rs_level_combo()
             SNR_input = float(self.SNR_txt.toPlainText())
-            Modulation_input = self.modulation_level_combo()
+            Modulation_input = self._active_modulation_input()
             # signal_create(Fs_input, Fc_input, Rs_input, SNR_input, Modulation_input)
             # 输出界面的内容，包含幅度，信噪比，符号速率
             [Fs, rec_wave, magnitude_GUJI, SNR_GUJI, RS_GUJI, min_val, max_val] = signal_create(Fs_input, Fc_input,
@@ -1222,17 +1336,22 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
             RS_estimate = RS_GUJI
             Rs_process = RS_GUJI / 1e9
             Fs_process = Fs / 1e9
-            image_path_STFT = './signal_ana/STFT_Org.jpg'
+            image_path_STFT = resolve_recognition_image_path('./signal_ana/STFT_Org.jpg')
             [height, center_frequency_output] = process_image(Rs_process, 1, rec_wave, Fs, SNR_estimate, image_path_STFT)
             self.update_progress()
 
             # 加载图像,一张是原始STFT，一张是标注了中心频点和高度的。
-            image_path_STFT = './signal_ana/STFT_Org.jpg'
+            image_path_STFT = resolve_recognition_image_path('./signal_ana/STFT_Org.jpg')
             image_path_STFT_ana = './signal_ana/STFT_Ana.jpg'
             image_grad_CAM = './signal_ana/bandwidth_Grad_Cam.jpg'
 
             # 图像识别求Fc
-            center_frequency_estimate = Fs_input / height * (height - center_frequency_output) - Fs_input / 2
+            center_frequency_estimate, stft_metadata = map_center_frequency_from_stft(
+                image_path_STFT,
+                height,
+                center_frequency_output,
+                Fs_input,
+            )
             Fc_process = center_frequency_estimate / 1e9
             self.update_progress()
 
@@ -1252,7 +1371,7 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
             r_image, rect_height, flag_mask = safe_detect(unet, image)
             img_name = 'street_mask.jpg'
             r_image.save(os.path.join(dir_save_path, img_name))
-            bandwidth_estimate_1 = rect_height / height * 10
+            bandwidth_estimate_1 = map_bandwidth_from_stft(rect_height, height, image_path_STFT, stft_metadata)
 
             # 神经网络求bandwidth
             image_path = image_path_STFT
@@ -1270,7 +1389,7 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
             r_image, rect_height, flag_mask = safe_detect(unet, image)
             img_name = 'street_mask.jpg'
             r_image.save(os.path.join(dir_save_path, img_name))
-            bandwidth_estimate_2 = rect_height / height * 10
+            bandwidth_estimate_2 = map_bandwidth_from_stft(rect_height, height, image_path_STFT, stft_metadata)
 
             bandwidth_true = (1 + 0.35) * Rs_input
             # 载波-3dB带宽计算
@@ -1476,7 +1595,7 @@ class Signal_analysis_form(QtWidgets.QWidget, Ui_Signal_analysis):
             except Exception:
                 SNR_input_ui = pdata.get("SNR_input", None)
             try:
-                Modulation_input_ui = self.modulation_level_combo()
+                Modulation_input_ui = self._active_modulation_input()
             except Exception:
                 Modulation_input_ui = pdata.get("Modulation_input", None)
 

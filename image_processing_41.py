@@ -260,8 +260,8 @@ def process_image(i, j, rec_wave, Fs, SNR, image_path_STFT):
             mask = cv2.imread(final_output_path, cv2.IMREAD_GRAYSCALE)
             cx, cy, vis, groups = center_from_top_bottom_white(mask, debug=True)
             print("center:", cx, cy)
-            if cy > 2772 * 0.5:
-                cy = 2772 - cy
+            if cy > height * 0.5:
+                cy = height - cy
             cv2.imwrite('debug_center.png', vis)
             return [cx / 2.0, cy / 2.0]
         else:

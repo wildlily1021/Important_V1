@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from signal_photo_save import signal_create_test
 import numpy as np
 import re
+from stft_pipeline import compute_spectrogram_matrix
 
 
 def format_scientific_notation(value):
@@ -597,6 +598,56 @@ def STFT_dreawing(Fs, rec_wave, widget):
     # layout = QVBoxLayout(widget)
     # layout.addWidget(sc_stft)
     layout.setStretch(0, 1)  # 让绘图区随着窗口变化自适应
+
+def STFT_dreawing(Fs, rec_wave, widget):
+    layout = widget.layout()
+    if layout is not None:
+        for i in reversed(range(layout.count())):
+            item = layout.itemAt(i)
+            widget_item = item.widget()
+            if isinstance(widget_item, MplCanvas):
+                widget_item.deleteLater()
+
+    sc_stft = MplCanvas(widget)
+    sc_stft.ax.clear()
+    sc_stft.ax.set_facecolor('black')
+
+    freqs_hz, times_s, matrix_db, _ = compute_spectrogram_matrix(rec_wave, Fs)
+    im = sc_stft.ax.imshow(
+        matrix_db.T,
+        aspect='auto',
+        origin='lower',
+        cmap='jet',
+        extent=[float(freqs_hz.min()), float(freqs_hz.max()), float(times_s.min()), float(times_s.max())]
+    )
+
+    font_prop_STFT = FontProperties(family='Segoe UI', size=12)
+    sc_stft.ax.set_xlabel('Frequency (Hz)', color='white', fontproperties=font_prop_STFT, labelpad=-1)
+    sc_stft.ax.set_ylabel('Time (s)', color='white', fontproperties=font_prop_STFT)
+
+    sc_stft.ax.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+    sc_stft.ax.yaxis.get_major_formatter().set_powerlimits((0, 1))
+    sc_stft.ax.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+    sc_stft.ax.xaxis.get_major_formatter().set_powerlimits((0, 1))
+
+    sc_stft.ax.set_facecolor('black')
+    sc_stft.ax.figure.patch.set_facecolor('black')
+    sc_stft.ax.tick_params(colors='white')
+    for label in sc_stft.ax.get_xticklabels() + sc_stft.ax.get_yticklabels():
+        label.set_fontproperties(font_prop_STFT)
+
+    cax = inset_axes(sc_stft.ax, width="100%", height="2.5%", loc='lower center', borderpad=-3.5)
+    cbar = sc_stft.figure.colorbar(im, cax=cax, orientation='horizontal', pad=0.2)
+    cbar.ax.tick_params(labelsize=10, colors='white')
+
+    sc_stft.figure.subplots_adjust(left=0.04, right=0.995, top=0.94, bottom=0.2)
+
+    if layout is None:
+        layout = QVBoxLayout(widget)
+        widget.setLayout(layout)
+    layout.addWidget(sc_stft)
+    layout.setStretch(0, 1)
+    return sc_stft
 
 def Eyediagram_dreawing(Fs, Rs, rec_wave, widget):
     # 分离实部和虚部
