@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from pathlib import Path
 # from excelwrite import write_to_excel
 global bandwidth, center_frequency
 
@@ -204,20 +205,12 @@ def process_image(i, j, rec_wave, Fs, SNR, image_path_STFT):
             print(f"Error saving image: {e}")
 
 
-    # Load the image
-    if j == 1:
-        image_path = './signal_ana/STFT_Org.jpg'
-        binary_output_path = f'./signal_ana/STFT_Org_binary.jpg'
-        morph_output_path = f'./signal_ana/STFT_Org_morph.jpg'
-        final_output_path = f'./signal_ana/STFT_Org_final.jpg'
-        black_output_path = f'./signal_ana/STFT_Org_black.jpg'
-    else:
-        image_path = image_path_STFT
-        final_output_path = f'./signal_ana/STFT_Org_txt_final.jpg'
-        binary_output_path = f'./signal_ana/STFT_Org_binary.jpg'
-        morph_output_path = f'./signal_ana/STFT_Org_morph.jpg'
-    # final_output_path = f'./spectrogram_{image_number}_final.jpg'
-    # black_output_path = f'./spectrogram_{image_number}_black.jpg'
+    image_path = str(image_path_STFT)
+    image_path_obj = Path(image_path)
+    binary_output_path = str(image_path_obj.with_name(f"{image_path_obj.stem}_binary.jpg"))
+    morph_output_path = str(image_path_obj.with_name(f"{image_path_obj.stem}_morph.jpg"))
+    final_output_path = str(image_path_obj.with_name(f"{image_path_obj.stem}_final.jpg"))
+    black_output_path = str(image_path_obj.with_name(f"{image_path_obj.stem}_black.jpg"))
 
     image = cv2.imread(image_path)
     if image is None:
@@ -260,10 +253,8 @@ def process_image(i, j, rec_wave, Fs, SNR, image_path_STFT):
             mask = cv2.imread(final_output_path, cv2.IMREAD_GRAYSCALE)
             cx, cy, vis, groups = center_from_top_bottom_white(mask, debug=True)
             print("center:", cx, cy)
-            if cy > height * 0.5:
-                cy = height - cy
             cv2.imwrite('debug_center.png', vis)
-            return [cx / 2.0, cy / 2.0]
+            return [cx, cy]
         else:
             # Receiver data
             x_rec = rec_wave
@@ -287,41 +278,14 @@ def process_image(i, j, rec_wave, Fs, SNR, image_path_STFT):
             J_max = np.max(function_J_2)
             idex_max = np.argmax(function_J_2)
             fre_center_esti = idex_max * delta_f
-            center_frequency_output = (Fs - 2 * fre_center_esti) * height / (2 * Fs)
+            center_frequency_output = (Fs - 2 * fre_center_esti) * height / Fs
             bandwidth_baoluo = 0
-            return [bandwidth_baoluo / 2.0, center_frequency_output / 2.0 / 1.001 * 0.993]
+            return [bandwidth_baoluo, center_frequency_output / 1.001 * 0.993]
 
     # [bandwidth, center_frequency] = photo_signal()
     [bandwidth_b, center_frequency_b] = photo_baoluo()
-    # bandwidth_output = bandwidth + bandwidth_b
-    # center_frequency_output = center_frequency + center_frequency_b
-    bandwidth_output = bandwidth_b * 2
-    if center_frequency_b > height * 0.25:
-        # Receiver data
-        x_rec = rec_wave
-        x_rec_con = np.conj(x_rec)
-        L_rec = len(x_rec)
-
-        # Autocorrelation calculations
-        R_0 = np.sum(x_rec * x_rec_con) / L_rec  # R(0)
-        R_1 = np.sum(x_rec[1:] * x_rec_con[:-1]) / (L_rec - 1)  # R(1)
-
-        # Frequency search
-        fre_num = 4096  # Number of frequency search points
-        delta_f = Fs / 2 / fre_num  # Frequency search interval
-        function_J_2 = np.zeros(int((Fs / 2 - delta_f) / delta_f) + 1, dtype=np.float64)  # Estimation function
-
-        # Frequency search loop
-        for idx, fre_find in enumerate(np.arange(delta_f, Fs / 2, delta_f)):
-            function_J_2[idx] = np.real((R_1 * np.conj(R_0)) * np.exp(-1j * 2 * np.pi * fre_find / Fs)) ** 2
-
-        # Maximum value corresponding to the center frequency
-        J_max = np.max(function_J_2)
-        idex_max = np.argmax(function_J_2)
-        fre_center_esti = idex_max * delta_f
-        center_frequency_output = (Fs - 2 * fre_center_esti) * height / (2 * Fs) / 0.992
-    else:
-        center_frequency_output = center_frequency_b * 2
+    bandwidth_output = bandwidth_b
+    center_frequency_output = center_frequency_b
     #处理中心频率偏差过高的问题：使用数据微调
     if j == 1:
         center_frequency_output = center_frequency_output * 0.98 / 1.02

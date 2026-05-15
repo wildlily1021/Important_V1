@@ -599,7 +599,7 @@ def STFT_dreawing(Fs, rec_wave, widget):
     # layout.addWidget(sc_stft)
     layout.setStretch(0, 1)  # 让绘图区随着窗口变化自适应
 
-def STFT_dreawing(Fs, rec_wave, widget):
+def _legacy_STFT_dreawing_unused(Fs, rec_wave, widget):
     layout = widget.layout()
     if layout is not None:
         for i in reversed(range(layout.count())):

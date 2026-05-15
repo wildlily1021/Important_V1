@@ -8,36 +8,39 @@ import numpy as np
 from stft_pipeline import (
     DEFAULT_IMAGE_HEIGHT,
     DEFAULT_IMAGE_WIDTH,
-    build_stft_products,
+    DEFAULT_MODEL_VMAX_DB,
+    DEFAULT_MODEL_VMIN_DB,
     compute_spectrogram_matrix,
+    create_stft_run_artifacts,
     render_spectrogram_image,
 )
 
 
-SIGNAL_ANA_DIR = Path("./signal_ana")
+SIGNAL_ANA_DIR = Path(__file__).resolve().parent / "signal_ana"
 
 
-def photo_save(rec_wave, Fs, num, Rs):
-    result = build_stft_products(
+def photo_save(rec_wave, Fs, num, Rs, *, keep_negative_frequencies=False, enable_local_recognition=False):
+    create_stft_run_artifacts(
         rec_wave,
         Fs,
-        panorama_image_path=SIGNAL_ANA_DIR / "STFT_Org.jpg",
-        panorama_metadata_path=SIGNAL_ANA_DIR / "STFT_Org.json",
-        local_image_path=SIGNAL_ANA_DIR / "STFT_Org_local.jpg",
-        local_metadata_path=SIGNAL_ANA_DIR / "STFT_Org_local.json",
-        mask_image_path=SIGNAL_ANA_DIR / "STFT_Org_mask.jpg",
+        output_dir=SIGNAL_ANA_DIR,
+        source_tag="generated",
         image_width_px=DEFAULT_IMAGE_WIDTH,
         image_height_px=DEFAULT_IMAGE_HEIGHT,
+        model_vmin_db=DEFAULT_MODEL_VMIN_DB,
+        model_vmax_db=DEFAULT_MODEL_VMAX_DB,
+        enable_local_recognition=enable_local_recognition,
+        keep_negative_frequencies=keep_negative_frequencies,
     )
-    return [result["vmin"], result["vmax"]]
+    return [DEFAULT_MODEL_VMIN_DB, DEFAULT_MODEL_VMAX_DB]
 
 
-def photo_save_test(rec_wave, Fs, Rs, Fc, SNR, Modulation, image_dir):
-    _save_single_stft_image(rec_wave, Fs, image_dir)
+def photo_save_test(rec_wave, Fs, Rs, Fc, SNR, Modulation, image_dir, *, keep_negative_frequencies=False):
+    _save_single_stft_image(rec_wave, Fs, image_dir, keep_negative_frequencies=keep_negative_frequencies)
 
 
-def photo_save_final(rec_wave, Fs, Rs, Fc, SNR, Modulation, image_dir):
-    _save_single_stft_image(rec_wave, Fs, image_dir)
+def photo_save_final(rec_wave, Fs, Rs, Fc, SNR, Modulation, image_dir, *, keep_negative_frequencies=False):
+    _save_single_stft_image(rec_wave, Fs, image_dir, keep_negative_frequencies=keep_negative_frequencies)
 
 
 def get_amplitude_from_rgb(rgb_value, min_val, max_val):
@@ -52,32 +55,33 @@ def get_amplitude_from_rgb(rgb_value, min_val, max_val):
     return dB_range[idx]
 
 
-def photo_save_scipy(rec_wave, Fs, num, Rs):
-    result = build_stft_products(
+def photo_save_scipy(rec_wave, Fs, num, Rs, *, keep_negative_frequencies=False, enable_local_recognition=False):
+    create_stft_run_artifacts(
         rec_wave,
         Fs,
-        panorama_image_path=SIGNAL_ANA_DIR / "STFT_Org_txt.jpg",
-        panorama_metadata_path=SIGNAL_ANA_DIR / "STFT_Org_txt.json",
-        local_image_path=SIGNAL_ANA_DIR / "STFT_Org_cropped.jpg",
-        local_metadata_path=SIGNAL_ANA_DIR / "STFT_Org_cropped.json",
-        mask_image_path=SIGNAL_ANA_DIR / "STFT_Org_mask.jpg",
+        output_dir=SIGNAL_ANA_DIR,
+        source_tag="file",
         image_width_px=DEFAULT_IMAGE_WIDTH,
         image_height_px=DEFAULT_IMAGE_HEIGHT,
+        model_vmin_db=DEFAULT_MODEL_VMIN_DB,
+        model_vmax_db=DEFAULT_MODEL_VMAX_DB,
+        enable_local_recognition=enable_local_recognition,
+        keep_negative_frequencies=keep_negative_frequencies,
     )
-    return [result["vmin"], result["vmax"]]
+    return [DEFAULT_MODEL_VMIN_DB, DEFAULT_MODEL_VMAX_DB]
 
 
-def _save_single_stft_image(rec_wave, Fs, image_dir):
-    freqs_hz, _, matrix_db, _ = compute_spectrogram_matrix(rec_wave, Fs)
-    if freqs_hz.size:
-        half_span = float(Fs) / 2.0
-        mask = (freqs_hz >= -half_span) & (freqs_hz <= half_span)
-        if np.any(mask):
-            matrix_db = matrix_db[mask, :]
-
+def _save_single_stft_image(rec_wave, Fs, image_dir, *, keep_negative_frequencies=False):
+    _, _, matrix_db, _ = compute_spectrogram_matrix(
+        rec_wave,
+        Fs,
+        keep_negative_frequencies=keep_negative_frequencies,
+    )
     render_spectrogram_image(
         matrix_db,
         image_dir,
         image_width_px=DEFAULT_IMAGE_WIDTH,
         image_height_px=DEFAULT_IMAGE_HEIGHT,
+        vmin=DEFAULT_MODEL_VMIN_DB,
+        vmax=DEFAULT_MODEL_VMAX_DB,
     )

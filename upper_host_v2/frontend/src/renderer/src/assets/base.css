@@ -1,0 +1,54 @@
+:root {
+  color-scheme: dark;
+  --bg: #06111c;
+  --bg-soft: #081a2a;
+  --panel-border: rgba(98, 128, 160, 0.18);
+  --panel-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  --text-strong: #edf7ff;
+  --text-soft: #c6d8ea;
+  --text-muted: #84a0bb;
+  --accent-cyan: #38bdf8;
+  --accent-orange: #f97316;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(249, 115, 22, 0.1), transparent 24%),
+    linear-gradient(180deg, #08131f 0%, #050b14 100%);
+  color: var(--text-soft);
+  font-family:
+    'Segoe UI Variable Display',
+    'Segoe UI',
+    'Microsoft YaHei UI',
+    'PingFang SC',
+    sans-serif;
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+ul {
+  list-style: none;
+}
+
+button,
+input,
+select,
+textarea {
+  appearance: none;
+}

@@ -282,6 +282,9 @@ def signal_create(Fs, Fc, Rs, SNR, Modulation):
         # plt.figure()
         # 计算STFT
         fre_psdx, psdx = welch(rec_wave, fs=Fs, nperseg=N_freq, noverlap=noverlap, nfft=N_freq, return_onesided=False)
+        positive_mask = fre_psdx >= 0
+        fre_psdx = fre_psdx[positive_mask]
+        psdx = psdx[positive_mask]
         plt.semilogy(fre_psdx, psdx)
         # 分段计算
         count = 200  # 分段数目
@@ -409,7 +412,7 @@ def signal_create(Fs, Fc, Rs, SNR, Modulation):
     # return Fs, rec_wave, magnitude_GUJI, SNR_GUJI, RS_GUJI
     return [Fs, rec_wave, magnitude_GUJI, SNR_GUJI, RS_GUJI, min_val, max_val]
 
-def signal_read(rec_wave, Fs):
+def signal_read(rec_wave, Fs, keep_negative_frequencies=False):
     #rec_wave接收到的信号，Fs采样频率
 
     def SNR_Analysis(rec_wave, Fs):
@@ -424,6 +427,9 @@ def signal_read(rec_wave, Fs):
         # plt.figure()
         # 计算STFT
         fre_psdx, psdx = welch(rec_wave, fs=Fs, nperseg=N_freq, noverlap=noverlap, nfft=N_freq, return_onesided=False)
+        positive_mask = fre_psdx >= 0
+        fre_psdx = fre_psdx[positive_mask]
+        psdx = psdx[positive_mask]
         plt.semilogy(fre_psdx, psdx)
         # 分段计算
         count = 200  # 分段数目
@@ -508,7 +514,14 @@ def signal_read(rec_wave, Fs):
     num = 2
     Fs_index = Fs
     Rs_index = 0
-    photo_save_scipy(rec_wave, Fs_index, num, Rs_index)
+    photo_save_scipy(
+        rec_wave,
+        Fs_index,
+        num,
+        Rs_index,
+        keep_negative_frequencies=keep_negative_frequencies,
+        enable_local_recognition=False,
+    )
     plt.clf()
     plt.close("all")
     # 计算每个采样点的幅度
@@ -717,6 +730,9 @@ def signal_create_test(Fs, Fc, Rs, SNR, Modulation, image_dir):
         # plt.figure()
         # 计算STFT
         fre_psdx, psdx = welch(rec_wave, fs=Fs, nperseg=N_freq, noverlap=noverlap, nfft=N_freq, return_onesided=False)
+        positive_mask = fre_psdx >= 0
+        fre_psdx = fre_psdx[positive_mask]
+        psdx = psdx[positive_mask]
         plt.semilogy(fre_psdx, psdx)
         # 分段计算
         count = 200  # 分段数目
@@ -1048,6 +1064,9 @@ def signal_create_test_inter(Fs, Fc, Rs, SNR, Modulation, image_dir):
         # plt.figure()
         # 计算STFT
         fre_psdx, psdx = welch(rec_wave, fs=Fs, nperseg=N_freq, noverlap=noverlap, nfft=N_freq, return_onesided=False)
+        positive_mask = fre_psdx >= 0
+        fre_psdx = fre_psdx[positive_mask]
+        psdx = psdx[positive_mask]
         plt.semilogy(fre_psdx, psdx)
         # 分段计算
         count = 200  # 分段数目
