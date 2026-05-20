@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import contextlib
+from math import pi
 import mimetypes
 import os
 import re
 import sys
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -125,7 +127,7 @@ def get_display_source_path(run_manifest: dict[str, Any], fallback: Path) -> Pat
     return fallback
 
 
-def derive_psd_band_estimate(source_path: Path) -> dict[str, float]:
+def derive_psd_band_estimate(source_path: Path) -> dict[str, Any]:
     modules = runtime_modules()
     cv2 = modules["cv2"]
 
@@ -141,9 +143,11 @@ def derive_psd_band_estimate(source_path: Path) -> dict[str, float]:
     freq_min_hz = float(stft_metadata.get("freq_min_hz", 0.0))
     freq_max_hz = float(stft_metadata.get("freq_max_hz", 0.0))
     psd_band = stft_metadata.get("psd_band") or {}
+    psd_band_coarse = psd_band.get("psd_band_coarse") or {}
+    psd_measure_final = stft_metadata.get("psd_measure_final") or psd_band.get("psd_measure_final") or {}
 
-    band_min_hz = psd_band.get("f_min_3db_hz", psd_band.get("f_min_hz"))
-    band_max_hz = psd_band.get("f_max_3db_hz", psd_band.get("f_max_hz"))
+    band_min_hz = psd_measure_final.get("f_left_3db_hz", psd_band.get("f_min_3db_hz", psd_band.get("f_min_hz")))
+    band_max_hz = psd_measure_final.get("f_right_3db_hz", psd_band.get("f_max_3db_hz", psd_band.get("f_max_hz")))
     if band_min_hz is None or band_max_hz is None:
         raise RuntimeError("PSD band metadata is incomplete")
 
@@ -157,16 +161,29 @@ def derive_psd_band_estimate(source_path: Path) -> dict[str, float]:
     row_start = max(0, min(top_row, bottom_row))
     row_end = min(image_height, max(top_row, bottom_row))
     rect_height = max(1, row_end - row_start)
-    center_row = 0.5 * (row_start + row_end)
+
+    center_frequency_hz = float(psd_measure_final.get("center_hz", 0.5 * (band_min_hz + band_max_hz)))
+    bandwidth_hz = float(psd_measure_final.get("bandwidth_hz", max(0.0, band_max_hz - band_min_hz)))
+    if psd_band_coarse:
+        coarse_center_hz = float(psd_band_coarse.get("center_hz", center_frequency_hz))
+        left_span_hz = max(coarse_center_hz - band_min_hz, 0.0)
+        right_span_hz = max(band_max_hz - coarse_center_hz, 0.0)
+        span_ratio = max(left_span_hz, right_span_hz) / max(min(left_span_hz, right_span_hz), 1.0)
+        if int(psd_measure_final.get("segment_count", 0) or 0) > 1 or span_ratio > 1.12:
+            center_frequency_hz = coarse_center_hz
+    center_row = float(frequency_to_pixel_y(center_frequency_hz, freq_min_hz, freq_max_hz, image_height))
 
     return {
-        "center_frequency_hz": 0.5 * (band_min_hz + band_max_hz),
-        "bandwidth_hz": max(0.0, band_max_hz - band_min_hz),
+        "center_frequency_hz": center_frequency_hz,
+        "bandwidth_hz": bandwidth_hz,
         "band_min_hz": band_min_hz,
         "band_max_hz": band_max_hz,
         "center_pixel_y": float(center_row),
         "rect_height_px": float(rect_height),
         "image_height_px": float(image_height),
+        "method": str(psd_measure_final.get("method", "metadata_band")),
+        "peak_hz": float(psd_measure_final.get("peak_hz", psd_band.get("peak_hz", center_frequency_hz))),
+        "centroid_hz": float(psd_measure_final.get("centroid_hz", center_frequency_hz)),
     }
 
 
@@ -183,23 +200,14 @@ def analyze_file(
     rec_wave, effective_fs, detected_fs = load_external_signal(file_path, fs_hz)
 
     modules = runtime_modules()
-    np = modules["np"]
     signal_read = modules["signal_read"]
     signal_ideal = modules["signal_ideal"]
-    flag1_tune = modules["flag1_tune"]
-    flag2_tune = modules["flag2_tune"]
-    flag3_tune = modules["flag3_tune"]
 
     with project_cwd():
-        keep_negative_frequencies = (
-            file_path.suffix.lower() == ".txt"
-            and np.iscomplexobj(rec_wave)
-            and float(np.max(np.abs(np.imag(np.asarray(rec_wave))))) > 1e-12
-        )
         Fs, rec_wave, magnitude_estimate, snr_estimate, rs_estimate = signal_read(
             rec_wave,
             effective_fs,
-            keep_negative_frequencies=keep_negative_frequencies,
+            keep_negative_frequencies=False,
         )
 
         rs_process = rs_estimate / 1e9
@@ -218,7 +226,8 @@ def analyze_file(
         rect_height = int(round(psd_estimate["rect_height_px"]))
 
         detect_band_region(image_path_stft, run_manifest["mask_image_path"])
-        bandwidth_true = (1 + 0.35 / 2) * rs_hz
+        # bandwidth_true = ((1-0.35)+2*0.35/pi*math.acos(math.sqrt(2)-1)) * rs_hz
+        bandwidth_true = 0.9048 * rs_hz
 
         evm_percentage, evm_db, papr, signal_star = signal_ideal(
             Fs, center_frequency_estimate, rs_estimate, rec_wave, modulation, snr_estimate
@@ -323,9 +332,6 @@ def analyze_generated(
     modules = runtime_modules()
     signal_create = modules["signal_create"]
     signal_ideal = modules["signal_ideal"]
-    flag1_tune = modules["flag1_tune"]
-    flag2_tune = modules["flag2_tune"]
-    flag3_tune = modules["flag3_tune"]
 
     with project_cwd():
         Fs, rec_wave, magnitude_estimate, snr_estimate, rs_estimate, min_val, max_val = signal_create(

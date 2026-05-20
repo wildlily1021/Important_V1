@@ -24,6 +24,15 @@ const CONSTELLATION_BOX = {
 }
 
 const DEFAULT_SPECTRUM_Y_LIMIT = 0.03
+const RADAR_LEVELS = [5, 10, 15, 20, 25]
+const RADAR_VIEWBOX = {
+  width: 360,
+  height: 360,
+  centerX: 180,
+  centerY: 180,
+  radius: 128,
+  labelOffset: 38
+}
 
 export function LineChart({
   points,
@@ -293,47 +302,86 @@ export function RadarChart({
 
   const axes = QUALITY_LABELS.length
   const angles = Array.from({ length: axes }, (_, index) => (Math.PI * 2 * index) / axes - Math.PI / 2)
-  const levels = [5, 10, 15, 20, 25]
 
   return (
     <div className="radar-shell">
-      <svg className="plot-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
-        <rect className="plot-bg" x="0" y="0" width="100" height="100" rx="6" />
-        {levels.map((level) => {
-          const polygon = angles
-            .map((angle) => {
-              const radius = (level / 25) * 30
-              const x = 50 + Math.cos(angle) * radius
-              const y = 50 + Math.sin(angle) * radius
-              return `${x},${y}`
-            })
-            .join(' ')
-          return <polygon key={level} className="radar-grid" points={polygon} />
-        })}
-        {angles.map((angle, index) => (
-          <line
-            key={`${angle}-${index}`}
-            className="radar-axis"
-            x1="50"
-            y1="50"
-            x2={50 + Math.cos(angle) * 32}
-            y2={50 + Math.sin(angle) * 32}
-          />
-        ))}
-        {series.map((item, index) => {
-          const color = QUALITY_COLORS[index % QUALITY_COLORS.length]
-          const values = qualityToArray(item.values)
-          const polygon = angles
-            .map((angle, angleIndex) => {
-              const radius = (values[angleIndex] / 25) * 30
-              const x = 50 + Math.cos(angle) * radius
-              const y = 50 + Math.sin(angle) * radius
-              return `${x},${y}`
-            })
-            .join(' ')
-          return <polygon key={`${item.label}-${index}`} className="radar-fill" style={{ fill: `${color}22`, stroke: color }} points={polygon} />
-        })}
-      </svg>
+      <div className="radar-stage">
+        <svg
+          className="plot-svg radar-svg"
+          viewBox={`0 0 ${RADAR_VIEWBOX.width} ${RADAR_VIEWBOX.height}`}
+          preserveAspectRatio="xMidYMid meet"
+        >
+          <rect className="plot-bg" x="0" y="0" width={RADAR_VIEWBOX.width} height={RADAR_VIEWBOX.height} rx="6" />
+          {RADAR_LEVELS.map((level) => (
+            <circle
+              key={level}
+              className={`radar-grid ${level === RADAR_LEVELS[RADAR_LEVELS.length - 1] ? 'radar-grid--outer' : ''}`.trim()}
+              cx={RADAR_VIEWBOX.centerX}
+              cy={RADAR_VIEWBOX.centerY}
+              r={radarRadius(level)}
+            />
+          ))}
+          {RADAR_LEVELS.map((level) => {
+            const tick = radarTickPosition(level)
+            return (
+              <text key={`tick-${level}`} className="radar-tick-label" x={tick.x} y={tick.y} textAnchor="start">
+                {level}
+              </text>
+            )
+          })}
+          {angles.map((angle, index) => {
+            const endpoint = radarPointAtValue(angle, RADAR_LEVELS[RADAR_LEVELS.length - 1])
+            return (
+              <line
+                key={`${angle}-${index}`}
+                className="radar-axis"
+                x1={RADAR_VIEWBOX.centerX}
+                y1={RADAR_VIEWBOX.centerY}
+                x2={endpoint.x}
+                y2={endpoint.y}
+              />
+            )
+          })}
+          {QUALITY_LABELS.map((label, index) => {
+            const { x, y } = radarLabelPosition(angles[index])
+            const lines = radarLabelLines(label)
+
+            return (
+              <text key={label} className="radar-label" x={x} y={y} textAnchor={radarTextAnchor(angles[index])}>
+                {lines.map((line, lineIndex) => (
+                  <tspan key={`${label}-${line}`} x={x} y={y - ((lines.length - 1) * 8) / 2 + lineIndex * 15}>
+                    {line}
+                  </tspan>
+                ))}
+              </text>
+            )
+          })}
+          {series.map((item, index) => {
+            const color = QUALITY_COLORS[index % QUALITY_COLORS.length]
+            const values = qualityToArray(item.values)
+            const polygon = radarPolygon(values, angles)
+
+            return (
+              <g key={`${item.label}-${index}`}>
+                <polygon className="radar-fill" style={{ fill: `${color}24`, stroke: color }} points={polygon} />
+                {values.map((value, valueIndex) => {
+                  const point = radarPointAtValue(angles[valueIndex], value)
+                  return (
+                    <circle
+                      key={`${item.label}-${QUALITY_LABELS[valueIndex]}`}
+                      className="radar-point"
+                      cx={point.x}
+                      cy={point.y}
+                      r="3.6"
+                      style={{ fill: color, stroke: '#0d0f11' }}
+                    />
+                  )
+                })}
+              </g>
+            )
+          })}
+        </svg>
+      </div>
       <div className="radar-legend">
         {series.map((item, index) => (
           <div key={item.label} className="legend-row">
@@ -344,6 +392,64 @@ export function RadarChart({
       </div>
     </div>
   )
+}
+
+function radarRadius(value: number): number {
+  const maxLevel = RADAR_LEVELS[RADAR_LEVELS.length - 1]
+  return (clamp(value, 0, maxLevel) / maxLevel) * RADAR_VIEWBOX.radius
+}
+
+function radarPointAtValue(angle: number, value: number): { x: number; y: number } {
+  const radius = radarRadius(value)
+  return {
+    x: RADAR_VIEWBOX.centerX + Math.cos(angle) * radius,
+    y: RADAR_VIEWBOX.centerY + Math.sin(angle) * radius
+  }
+}
+
+function radarTickPosition(level: number): { x: number; y: number } {
+  return {
+    x: RADAR_VIEWBOX.centerX + 8,
+    y: RADAR_VIEWBOX.centerY - radarRadius(level) + 4
+  }
+}
+
+function radarLabelPosition(angle: number): { x: number; y: number } {
+  const distance = RADAR_VIEWBOX.radius + RADAR_VIEWBOX.labelOffset
+  return {
+    x: RADAR_VIEWBOX.centerX + Math.cos(angle) * distance,
+    y: RADAR_VIEWBOX.centerY + Math.sin(angle) * distance
+  }
+}
+
+function radarLabelLines(label: string): string[] {
+  switch (label) {
+    case '载波中心频率误差':
+      return ['载波中心', '频率误差']
+    case '载噪比误差':
+      return ['载噪比', '误差']
+    case '载波-3dB带宽误差':
+      return ['载波-3dB', '带宽误差']
+    default:
+      return [label]
+  }
+}
+
+function radarTextAnchor(angle: number): 'start' | 'middle' | 'end' {
+  const horizontal = Math.cos(angle)
+  if (Math.abs(horizontal) < 0.25) {
+    return 'middle'
+  }
+  return horizontal > 0 ? 'start' : 'end'
+}
+
+function radarPolygon(values: number[], angles: number[]): string {
+  return angles
+    .map((angle, index) => {
+      const point = radarPointAtValue(angle, values[index] ?? 0)
+      return `${point.x},${point.y}`
+    })
+    .join(' ')
 }
 
 function drawSpectrumCanvas(

@@ -107,7 +107,7 @@ def estimate_psd_band(
     *,
     nfft: int | None = None,
     keep_negative_frequencies: bool = False,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     signal = _as_complex_array(samples)
     nfft = int(nfft or max(4096, select_stft_params(fs_hz, signal.size)["nfft"]))
     nperseg = min(nfft, max(64, signal.size))
@@ -129,6 +129,8 @@ def estimate_psd_band(
         positive_mask = freqs_hz >= 0
         freqs_hz = freqs_hz[positive_mask]
         psd = psd[positive_mask]
+    freqs_hz, psd = _sort_frequency_and_values(freqs_hz, psd)
+    psd = np.maximum(psd, EPSILON)
     psd_db = 10.0 * np.log10(np.maximum(psd, EPSILON))
     smooth_size = max(5, int(round(nfft / 512)))
     psd_db_smooth = uniform_filter1d(psd_db, size=smooth_size, mode="nearest")
@@ -145,19 +147,31 @@ def estimate_psd_band(
     start_idx, end_idx = _segment_containing_index(band_mask, peak_idx)
     df_hz = float(abs(freqs_hz[1] - freqs_hz[0])) if freqs_hz.size > 1 else float(fs_hz)
 
-    peak_minus_3db = peak_db - 3.0
-    left_3db = peak_idx
-    right_3db = peak_idx
-    while left_3db > 0 and psd_db_smooth[left_3db - 1] >= peak_minus_3db:
-        left_3db -= 1
-    while right_3db < psd_db_smooth.size - 1 and psd_db_smooth[right_3db + 1] >= peak_minus_3db:
-        right_3db += 1
-
     f_min_hz = float(freqs_hz[start_idx] - 0.5 * df_hz)
     f_max_hz = float(freqs_hz[end_idx] + 0.5 * df_hz)
-    f_min_3db_hz = float(freqs_hz[left_3db] - 0.5 * df_hz)
-    f_max_3db_hz = float(freqs_hz[right_3db] + 0.5 * df_hz)
     bandwidth_hz = max(df_hz, f_max_hz - f_min_hz)
+    coarse_band = {
+        "f_min_hz": f_min_hz,
+        "f_max_hz": f_max_hz,
+        "center_hz": 0.5 * (f_min_hz + f_max_hz),
+        "bandwidth_hz": float(bandwidth_hz),
+        "start_idx": int(start_idx),
+        "end_idx": int(end_idx),
+        "threshold_db": threshold_db,
+    }
+    final_measurement = _measure_final_psd_band(
+        freqs_hz=freqs_hz,
+        psd=psd,
+        psd_db_smooth=psd_db_smooth,
+        coarse_start_idx=start_idx,
+        coarse_end_idx=end_idx,
+        peak_idx=peak_idx,
+        noise_floor_db=noise_floor_db,
+        smooth_size=smooth_size,
+        df_hz=df_hz,
+    )
+    f_min_3db_hz = float(final_measurement["f_left_3db_hz"])
+    f_max_3db_hz = float(final_measurement["f_right_3db_hz"])
     bandwidth_3db_hz = max(df_hz, f_max_3db_hz - f_min_3db_hz)
 
     signal_power = float(np.sum(psd[start_idx : end_idx + 1]) * df_hz)
@@ -167,21 +181,160 @@ def estimate_psd_band(
     cnr_db = 10.0 * math.log10(carrier_power / noise_power)
     frequency_span_hz = float(freqs_hz[-1] - freqs_hz[0] + df_hz) if freqs_hz.size > 1 else float(fs_hz)
 
-    return {
+    result = {
         "f_min_hz": f_min_hz,
         "f_max_hz": f_max_hz,
-        "center_hz": 0.5 * (f_min_hz + f_max_hz),
+        "center_hz": coarse_band["center_hz"],
         "bandwidth_hz": float(bandwidth_hz),
         "bandwidth_3db_hz": float(bandwidth_3db_hz),
         "f_min_3db_hz": f_min_3db_hz,
         "f_max_3db_hz": f_max_3db_hz,
+        "center_3db_hz": float(final_measurement["center_hz"]),
         "eta": float(bandwidth_hz / max(frequency_span_hz, 1.0)),
         "cnr_db": float(cnr_db),
         "threshold_db": threshold_db,
         "noise_floor_db": noise_floor_db,
         "peak_db": peak_db,
+        "peak_hz": float(freqs_hz[peak_idx]),
         "nfft": int(nfft),
         "df_hz": float(df_hz),
+        "psd_band_coarse": coarse_band,
+        "psd_measure_final": final_measurement,
+        "debug": {
+            "psd_linear_min": float(np.min(psd)),
+            "psd_linear_max": float(np.max(psd)),
+            "psd_db_min": float(np.min(psd_db)),
+            "psd_db_max": float(np.max(psd_db)),
+            "psd_db_smooth_min": float(np.min(psd_db_smooth)),
+            "psd_db_smooth_max": float(np.max(psd_db_smooth)),
+            "freq_min_hz": float(freqs_hz[0]) if freqs_hz.size else 0.0,
+            "freq_max_hz": float(freqs_hz[-1]) if freqs_hz.size else 0.0,
+        },
+    }
+    _log_psd_measurement_debug(result)
+    return result
+
+
+def _measure_final_psd_band(
+    *,
+    freqs_hz: np.ndarray,
+    psd: np.ndarray,
+    psd_db_smooth: np.ndarray,
+    coarse_start_idx: int,
+    coarse_end_idx: int,
+    peak_idx: int,
+    noise_floor_db: float,
+    smooth_size: int,
+    df_hz: float,
+) -> dict[str, float | str | bool]:
+    local_slice = slice(coarse_start_idx, coarse_end_idx + 1)
+    local_freqs = freqs_hz[local_slice]
+    local_psd = np.maximum(psd[local_slice], EPSILON)
+    local_psd_db = 10.0 * np.log10(local_psd)
+    local_smooth_size = _bounded_odd_window(local_psd_db.size, max(smooth_size * 4, int(round(local_psd_db.size * 0.08))))
+    local_psd_db_smooth = uniform_filter1d(local_psd_db, size=local_smooth_size, mode="nearest")
+    local_refine_size = _bounded_odd_window(local_psd_db.size, max(5, smooth_size))
+    local_psd_db_refine = uniform_filter1d(local_psd_db, size=local_refine_size, mode="nearest")
+
+    local_peak_idx = int(np.argmax(local_psd_db_smooth))
+    peak_db_local = float(local_psd_db_smooth[local_peak_idx])
+    peak_hz = float(local_freqs[local_peak_idx])
+    plateau_gate_db = max(noise_floor_db + 6.0, peak_db_local - 10.0)
+    plateau_mask = local_psd_db_smooth >= plateau_gate_db
+    if np.any(plateau_mask):
+        plateau_ref_db = float(np.median(local_psd_db_smooth[plateau_mask]))
+    else:
+        plateau_ref_db = peak_db_local
+    threshold_3db_db = plateau_ref_db - 3.0
+
+    above_threshold_mask = local_psd_db_smooth >= threshold_3db_db
+    above_threshold_mask = _bridge_small_false_gaps(
+        above_threshold_mask,
+        max_gap_bins=max(1, local_smooth_size // 2),
+    )
+    mask_indices = np.flatnonzero(above_threshold_mask)
+    segment_count = 0
+    if mask_indices.size:
+        segment_count = int(np.count_nonzero(np.diff(mask_indices) > 1) + 1)
+
+    left_cross = None
+    right_cross = None
+    if mask_indices.size:
+        left_idx = int(mask_indices[0])
+        right_idx = int(mask_indices[-1])
+
+        for idx in range(min(left_idx + 1, local_psd_db_refine.size - 1), 0, -1):
+            if local_psd_db_refine[idx - 1] < threshold_3db_db <= local_psd_db_refine[idx]:
+                left_cross = _interpolate_threshold_crossing(
+                    local_freqs[idx - 1],
+                    local_psd_db_refine[idx - 1],
+                    local_freqs[idx],
+                    local_psd_db_refine[idx],
+                    threshold_3db_db,
+                )
+                break
+        if left_cross is None and left_idx > 0:
+            left_cross = _interpolate_threshold_crossing(
+                local_freqs[left_idx - 1],
+                local_psd_db_refine[left_idx - 1],
+                local_freqs[left_idx],
+                local_psd_db_refine[left_idx],
+                threshold_3db_db,
+            )
+
+        for idx in range(max(right_idx, 0), local_psd_db_refine.size - 1):
+            if local_psd_db_refine[idx] >= threshold_3db_db > local_psd_db_refine[idx + 1]:
+                right_cross = _interpolate_threshold_crossing(
+                    local_freqs[idx],
+                    local_psd_db_refine[idx],
+                    local_freqs[idx + 1],
+                    local_psd_db_refine[idx + 1],
+                    threshold_3db_db,
+                )
+                break
+        if right_cross is None and right_idx < local_psd_db_refine.size - 1:
+            right_cross = _interpolate_threshold_crossing(
+                local_freqs[right_idx],
+                local_psd_db_refine[right_idx],
+                local_freqs[right_idx + 1],
+                local_psd_db_refine[right_idx + 1],
+                threshold_3db_db,
+            )
+
+    final_left = float(left_cross) if left_cross is not None else float(local_freqs[0] - 0.5 * df_hz)
+    final_right = float(right_cross) if right_cross is not None else float(local_freqs[-1] + 0.5 * df_hz)
+    if final_right < final_left:
+        final_left, final_right = final_right, final_left
+
+    centroid_threshold_db = max(noise_floor_db + 3.0, peak_db_local - 10.0)
+    centroid_mask = local_psd_db_smooth >= centroid_threshold_db
+    if np.any(centroid_mask):
+        centroid_weights = np.maximum(local_psd[centroid_mask], EPSILON)
+        centroid_hz = float(np.average(local_freqs[centroid_mask], weights=centroid_weights))
+    else:
+        centroid_hz = peak_hz
+
+    crossings_found = mask_indices.size > 0
+    center_hz = 0.5 * (final_left + final_right) if crossings_found else centroid_hz
+    bandwidth_hz = max(df_hz, final_right - final_left)
+
+    return {
+        "method": "3db_outer_edges" if crossings_found else "centroid_fallback",
+        "success": bool(crossings_found),
+        "peak_hz": peak_hz,
+        "peak_db": peak_db_local,
+        "reference_db": plateau_ref_db,
+        "centroid_hz": centroid_hz,
+        "threshold_3db_db": threshold_3db_db,
+        "f_left_3db_hz": final_left,
+        "f_right_3db_hz": final_right,
+        "center_hz": center_hz,
+        "bandwidth_hz": bandwidth_hz,
+        "local_smooth_size": int(local_smooth_size),
+        "local_refine_size": int(local_refine_size),
+        "left_cross_found": bool(left_cross is not None),
+        "right_cross_found": bool(right_cross is not None),
+        "segment_count": segment_count,
     }
 
 
@@ -222,6 +375,7 @@ def build_stft_products(
         nfft=max(4096, params["nfft"]),
         keep_negative_frequencies=keep_negative_frequencies,
     )
+    psd_measure_final = psd_band.get("psd_measure_final") or {}
     freqs_hz, _, matrix_db, params = compute_spectrogram_matrix(
         signal,
         fs_hz,
@@ -264,7 +418,8 @@ def build_stft_products(
         "nperseg": int(params["nperseg"]),
         "noverlap": int(params["noverlap"]),
         "psd_band": psd_band,
-        "bandwidth_3db_hz": float(psd_band["bandwidth_3db_hz"]),
+        "psd_measure_final": psd_measure_final,
+        "bandwidth_3db_hz": float(psd_measure_final.get("bandwidth_hz", psd_band["bandwidth_3db_hz"])),
         "cnr_db": float(psd_band["cnr_db"]),
         "bbox_inches": None,
         "display_min_db": float(panorama_limits["vmin"]),
@@ -331,7 +486,8 @@ def build_stft_products(
             "nperseg": int(params["nperseg"]),
             "noverlap": int(params["noverlap"]),
             "psd_band": psd_band,
-            "bandwidth_3db_hz": float(psd_band["bandwidth_3db_hz"]),
+            "psd_measure_final": psd_measure_final,
+            "bandwidth_3db_hz": float(psd_measure_final.get("bandwidth_hz", psd_band["bandwidth_3db_hz"])),
             "cnr_db": float(psd_band["cnr_db"]),
             "bbox_inches": None,
             "display_min_db": float(local_limits["vmin"]),
@@ -644,6 +800,79 @@ def frequency_to_pixel_y(
     span = max(freq_max_hz - freq_min_hz, 1.0)
     ratio = float(np.clip((freq_max_hz - frequency_hz) / span, 0.0, 1.0))
     return int(round(ratio * image_height_px))
+
+
+def _sort_frequency_and_values(freqs_hz: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if freqs_hz.size <= 1:
+        return freqs_hz, values
+    order = np.argsort(freqs_hz)
+    return freqs_hz[order], values[order]
+
+
+def _bounded_odd_window(length: int, proposal: int) -> int:
+    if length <= 1:
+        return 1
+    size = max(3, min(int(proposal), int(length)))
+    if size % 2 == 0:
+        size -= 1
+    if size < 3:
+        size = 3 if length >= 3 else length
+    return max(1, size)
+
+
+def _bridge_small_false_gaps(mask: np.ndarray, *, max_gap_bins: int) -> np.ndarray:
+    filled = np.asarray(mask, dtype=bool).copy()
+    if max_gap_bins <= 0 or filled.size == 0:
+        return filled
+
+    false_start = None
+    for idx, value in enumerate(filled):
+        if not value and false_start is None:
+            false_start = idx
+        elif value and false_start is not None:
+            gap_size = idx - false_start
+            if false_start > 0 and gap_size <= max_gap_bins:
+                filled[false_start:idx] = True
+            false_start = None
+
+    return filled
+
+
+def _interpolate_threshold_crossing(
+    freq_a_hz: float,
+    value_a_db: float,
+    freq_b_hz: float,
+    value_b_db: float,
+    threshold_db: float,
+) -> float:
+    if value_b_db == value_a_db:
+        return 0.5 * (freq_a_hz + freq_b_hz)
+    ratio = (threshold_db - value_a_db) / (value_b_db - value_a_db)
+    ratio = float(np.clip(ratio, 0.0, 1.0))
+    return float(freq_a_hz + ratio * (freq_b_hz - freq_a_hz))
+
+
+def _log_psd_measurement_debug(result: dict[str, Any]) -> None:
+    coarse = result.get("psd_band_coarse") or {}
+    final = result.get("psd_measure_final") or {}
+    debug = result.get("debug") or {}
+    print(
+        "[PSD] "
+        f"freq=({debug.get('freq_min_hz', 0.0):.3e},{debug.get('freq_max_hz', 0.0):.3e}) "
+        f"lin=({debug.get('psd_linear_min', 0.0):.3e},{debug.get('psd_linear_max', 0.0):.3e}) "
+        f"dB=({debug.get('psd_db_min', 0.0):.2f},{debug.get('psd_db_max', 0.0):.2f})"
+    )
+    print(
+        "[PSD] "
+        f"coarse=({coarse.get('f_min_hz', 0.0):.3e},{coarse.get('f_max_hz', 0.0):.3e}) "
+        f"peak={result.get('peak_hz', 0.0):.3e}Hz/{result.get('peak_db', 0.0):.2f}dB "
+        f"noise={result.get('noise_floor_db', 0.0):.2f}dB "
+        f"final=({final.get('f_left_3db_hz', 0.0):.3e},{final.get('f_right_3db_hz', 0.0):.3e}) "
+        f"center={final.get('center_hz', 0.0):.3e}Hz "
+        f"bw={final.get('bandwidth_hz', 0.0):.3e}Hz "
+        f"method={final.get('method', 'unknown')} "
+        f"segments={final.get('segment_count', 0)}"
+    )
 
 
 def _segment_containing_index(mask: np.ndarray, index: int) -> tuple[int, int]:

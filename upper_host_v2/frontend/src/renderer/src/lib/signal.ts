@@ -14,7 +14,7 @@ export const MODULATION_OPTIONS = [
   { value: 4, label: '64QAM' }
 ] as const
 
-export const QUALITY_LABELS = ['载噪比误差', '载波中心频率误差', '载波-3dB带宽误差', 'EVM']
+export const QUALITY_LABELS = ['载波中心频率', '载噪比', 'EVM', '载波-3dB带宽']
 
 export const QUALITY_COLORS = ['#f97316', '#38bdf8', '#4ade80', '#f472b6']
 
@@ -251,6 +251,7 @@ export function buildQualityScores(result: AnalysisResult, form: SignalFormState
   const rsInput = toHertz(form.rsValue, form.rsUnit)
   const snrInput = parseSNR(form.snrValue)
   const evmPercent = result.estimates.evm_percent
+  const expectedBandwidthHz = deriveExpectedBandwidthHz(result, rsInput)
 
   const centerFrequency =
     rsInput > 0
@@ -259,7 +260,7 @@ export function buildQualityScores(result: AnalysisResult, form: SignalFormState
 
   const bandwidth =
     rsInput > 0
-      ? clamp(25 - ((Math.abs(result.estimates.bandwidth_hz - result.bandwidth_true_hz) / rsInput) * 10 - 1), 0, 25)
+      ? clamp(25 - ((Math.abs(result.estimates.bandwidth_hz - expectedBandwidthHz) / rsInput) * 10 - 1), 0, 25)
       : 0
 
   const snr = clamp(25 - Math.abs(result.estimates.snr_db - snrInput) * 2.5, 0, 25)
@@ -287,20 +288,39 @@ export function buildErrorMetrics(result: AnalysisResult, form: SignalFormState)
   const fcInput = toHertz(form.fcValue, form.fcUnit)
   const rsInput = toHertz(form.rsValue, form.rsUnit)
   const snrInput = parseSNR(form.snrValue)
+  const displayedCenterFrequency = parseDisplayNumber(result.display_values.center_frequency)
+  const displayedBandwidth = parseDisplayNumber(result.display_values.bandwidth)
+  const displayedSnr = parseDisplayNumber(result.display_values.snr)
+  const expectedBandwidthHz = deriveExpectedBandwidthHz(result, rsInput)
 
   return {
     center_frequency_percent:
-      rsInput > 0 ? Math.abs(((result.estimates.center_frequency_hz - fcInput) / rsInput) * 100) : null,
-    bandwidth_percent:
-      rsInput > 0
-        ? Math.abs(((result.estimates.bandwidth_hz - result.bandwidth_true_hz) / rsInput) * 100)
+      rsInput > 0 && displayedCenterFrequency !== null
+        ? Math.abs(((displayedCenterFrequency - fcInput) / rsInput) * 100)
         : null,
-    snr_db: Math.abs(result.estimates.snr_db - snrInput)
+    bandwidth_percent:
+      rsInput > 0 && displayedBandwidth !== null
+        ? Math.abs(((displayedBandwidth - expectedBandwidthHz) / rsInput) * 100)
+        : null,
+    snr_db: displayedSnr !== null ? Math.abs(displayedSnr - snrInput) : null
   }
 }
 
+function deriveExpectedBandwidthHz(result: AnalysisResult, rsInput: number): number {
+  if (!(rsInput > 0)) {
+    return result.bandwidth_true_hz
+  }
+
+  return result.mode === 'file' ? 0.9048 * rsInput : 1.35 * rsInput
+}
+
+function parseDisplayNumber(value: string): number | null {
+  const parsed = Number.parseFloat(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 export function qualityToArray(quality: QualityScores): number[] {
-  return [quality.snr, quality.center_frequency, quality.bandwidth, quality.evm]
+  return [quality.center_frequency, quality.snr, quality.evm, quality.bandwidth]
 }
 
 export function clamp(value: number, min: number, max: number): number {

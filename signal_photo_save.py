@@ -8,6 +8,31 @@ from scipy.signal import hilbert, correlate, welch
 from scipy.fft import fftshift, fft
 from scipy.ndimage import uniform_filter1d
 import pywt
+
+
+def estimate_symbol_rate_from_waveform(rec_wave, Fs):
+    signal_array = np.asarray(rec_wave)
+    if np.iscomplexobj(signal_array) and np.max(np.abs(np.imag(signal_array))) > 1e-12:
+        envelope = np.abs(signal_array)
+    else:
+        envelope = np.abs(hilbert(np.real(signal_array)))
+
+    if envelope.size < 4:
+        return 0.0
+
+    diff_envelope = np.abs(envelope[1:]) - np.abs(envelope[:-1])
+    fft_diff = np.abs(fft(np.concatenate(([0], diff_envelope))))
+    fft_diff_fast = uniform_filter1d(np.abs(fft_diff), size=1)
+    fft_diff_slow = uniform_filter1d(np.abs(fft_diff), size=100)
+    fft_ratio = fft_diff_fast / np.maximum(fft_diff_slow, np.finfo(float).eps)
+
+    sample_count = len(signal_array)
+    delta_f = Fs / sample_count
+    search_slice = fft_ratio[: int(sample_count // 2)]
+    peak_index = int(np.argmax(search_slice)) if search_slice.size else 0
+    return float(peak_index * delta_f)
+
+
 def signal_create(Fs, Fc, Rs, SNR, Modulation):
     # """ Raised cosine FIR filter design
     # Calculates square root raised cosine FIR
@@ -406,7 +431,7 @@ def signal_create(Fs, Fc, Rs, SNR, Modulation):
     SNR_GUJI = SNR_Analysis(rec_wave, Fs)
     plt.clf()
     plt.close("all")
-    RS_GUJI = Rs_Analysis(rec_wave, Fs)
+    RS_GUJI = estimate_symbol_rate_from_waveform(rec_wave, Fs)
     plt.clf()
     plt.close("all")
     # return Fs, rec_wave, magnitude_GUJI, SNR_GUJI, RS_GUJI
@@ -519,7 +544,7 @@ def signal_read(rec_wave, Fs, keep_negative_frequencies=False):
         Fs_index,
         num,
         Rs_index,
-        keep_negative_frequencies=keep_negative_frequencies,
+        keep_negative_frequencies=False,
         enable_local_recognition=False,
     )
     plt.clf()
@@ -531,7 +556,7 @@ def signal_read(rec_wave, Fs, keep_negative_frequencies=False):
     SNR_GUJI = SNR_Analysis(rec_wave, Fs)
     plt.clf()
     plt.close("all")
-    RS_GUJI = Rs_Analysis(rec_wave, Fs)
+    RS_GUJI = estimate_symbol_rate_from_waveform(rec_wave, Fs)
     plt.clf()
     plt.close("all")
     # return Fs, rec_wave, magnitude_GUJI, SNR_GUJI, RS_GUJI
